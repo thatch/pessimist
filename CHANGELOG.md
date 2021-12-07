@@ -1,3 +1,7 @@
+## v0.9.1
+
+* Add some missing dependencies that we were getting transitively before
+
 ## v0.9.0
 
 * Handle some oddities that can exist in requirements.txt
