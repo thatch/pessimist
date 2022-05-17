@@ -7,14 +7,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
 from subprocess import check_call, PIPE, run, STDOUT
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from highlighter import EnvironmentMarkers
 from honesty.cache import Cache
 from honesty.releases import Package, parse_index
-from honesty.version import Version
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 LOG = logging.getLogger(__name__)
 
@@ -39,6 +40,33 @@ class Result:
     output: str
 
 
+# This is a trimmed-down version of dowsing.deps._find_compatible_version that
+# returns a list.
+def _filter_versions(
+    req: Requirement,
+    cache: Cache,
+    python_version: Version,
+    extend: Optional[List[str]] = None,
+) -> Tuple[Package, List[Version]]:
+    name = canonicalize_name(req.name)
+    pkg = parse_index(name, cache, use_json=True)
+
+    possible: List[Version] = []
+
+    for k, v in pkg.releases.items():
+        requires_python = None
+        for fe in v.files:
+            if fe.requires_python:
+                requires_python = SpecifierSet(fe.requires_python)
+                break
+        if not requires_python or python_version in requires_python:
+            assert isinstance(k, Version)
+            possible.append(k)
+    if extend is None or not ("*" in extend or name in extend):
+        possible = list(req.specifier.filter(possible))
+    return pkg, possible
+
+
 class Manager:
     def __init__(
         self,
@@ -57,9 +85,9 @@ class Manager:
         self.names: Set[str] = set()
         self.packages: Dict[str, Package] = {}
         self.versions: Dict[str, List[Version]] = {}
-        env = EnvironmentMarkers.for_python(
-            ".".join(map(str, sys.version_info[:3])), sys.platform
-        )
+        python_version_str = ".".join(map(str, sys.version_info[:3]))
+        python_version = Version(python_version_str)
+        env = EnvironmentMarkers.for_python(python_version_str, sys.platform)
 
         self.pip_lines = [line for line in fixed if self._is_pip_line(line)]
         fixed = [line for line in fixed if not self._is_pip_line(line)]
@@ -81,14 +109,8 @@ class Manager:
                 if req.marker and not env.match(req.marker):
                     continue
 
-                name = canonicalize_name(req.name)
+                pkg, versions = _filter_versions(req, cache, python_version)
 
-                pkg = parse_index(name, cache, use_json=True)
-                self.packages[name] = pkg
-
-                versions: List[Version] = list(
-                    req.specifier.filter(pkg.releases.keys())  # type: ignore
-                )
                 if len(versions) == 0:
                     raise DepError("No versions match {req_str!r}; maybe pre-only?")
                 if len(versions) > 1:
@@ -96,6 +118,7 @@ class Manager:
                         f"More than one version matched {req_str!r}; picking one arbitrarily."
                     )
 
+                name = canonicalize_name(req.name)
                 self.versions[name] = [versions[-1]]
                 LOG.info(
                     f"  [fixed] fetched {req.name}: {len(versions)}/{len(pkg.releases)} allowed; keeping {versions[-1]!r}"
@@ -106,17 +129,13 @@ class Manager:
                 if req.marker and not env.match(req.marker):
                     continue
 
-                name = canonicalize_name(req.name)
+                pkg, versions = _filter_versions(
+                    req, cache, python_version, extend=self.extend
+                )
 
-                pkg = parse_index(name, cache, use_json=True)
+                name = canonicalize_name(req.name)
                 self.packages[name] = pkg
 
-                if name in self.extend or "*" in self.extend:
-                    versions = list(pkg.releases.keys())  # type: ignore
-                else:
-                    versions = list(
-                        req.specifier.filter(pkg.releases.keys())  # type: ignore
-                    )
                 LOG.info(
                     f"  [variable] fetched {name}: {len(versions)}/{len(pkg.releases)} allowed"
                 )
@@ -124,7 +143,7 @@ class Manager:
                 if len(versions) == 0:
                     raise DepError("No versions match {req_str!r}; maybe pre-only?")
 
-                if name in versions:
+                if name in self.versions:
                     # Presumably this came from being in 'fixed' too; not being
                     # in 'variable' twice.  If so it will only have one version.
                     if self.versions[name][0] not in versions:
@@ -207,6 +226,21 @@ class Manager:
                     env["PATH"] = f"{d}/bin:{cur_path}"
                     env["PYTHON"] = f"{d}/bin/python"
                 env["COVERAGE_FILE"] = f"{d}/.coverage"
+
+                # Pip 20.3+ includes the new solver and it doesn't appear
+                # there's a long-term ability to disable it.  We want to just
+                # overlay a pile of requirements to see if they play nice
+                # together.  This might get unintentionally upgraded later in
+                # the process though.
+                buf = [env["PYTHON"], "-m", "pip", "install", "pip==20.2"]
+                proc = run(
+                    buf,
+                    env=env,
+                    stdout=PIPE,
+                    stderr=STDOUT,
+                    cwd=self.path,
+                    encoding="utf-8",
+                )
 
                 while True:
                     item: Optional[Plan] = queue.get(block=True)
