@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
-from subprocess import PIPE, STDOUT, check_call, run
+from subprocess import check_call, PIPE, run, STDOUT
 from typing import Dict, List, Optional, Set
 
 from highlighter import EnvironmentMarkers
@@ -171,7 +171,11 @@ class Manager:
                 vers[k] = v
                 ret.append(
                     Plan(
-                        title=f"{k}:{v}", versions=vers, fatal=False, name=k, version=v,
+                        title=f"{k}:{v}",
+                        versions=vers,
+                        fatal=False,
+                        name=k,
+                        version=v,
                     )
                 )
         return ret

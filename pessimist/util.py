@@ -36,7 +36,8 @@ def compat_system(source_dir: Path) -> Dict[str, Any]:
     except (FileNotFoundError, KeyError):
         system = {}
     system.setdefault(
-        "build-backend", "setuptools.build_meta:__legacy__",
+        "build-backend",
+        "setuptools.build_meta:__legacy__",
     )
     system.setdefault("requires", ["setuptools", "wheel"])
     return system
